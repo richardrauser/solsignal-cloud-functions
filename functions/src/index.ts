@@ -162,7 +162,7 @@ export const transactionUpdate = onRequest(
 export const alertCreated = onDocumentCreated(
   {
     document: "alerts/{documentId}",
-    secrets: [Secrets.HeliusAuthHeader],
+    secrets: [Secrets.HeliusApiKey],
   },
   async (event) => {
     console.log("onDocumentCreated event: ", event);
@@ -177,30 +177,38 @@ export const alertCreated = onDocumentCreated(
       alert?.walletAddress
     );
 
-    const heliusApiKey = process.env.HELIUS_API_KEY;
+    const currentAlertCount = await loadAlertCountForWalletAddress(
+      alert?.walletAddress
+    );
 
-    if (!heliusApiKey) {
-      const errorMessage = "Helius API key not found";
-      console.error(errorMessage);
-      throw Error(errorMessage);
+    logger.info("Current alert count: " + currentAlertCount);
+
+    if (currentAlertCount == 0) {
+      const heliusApiKey = process.env.HELIUS_API_KEY;
+
+      if (!heliusApiKey) {
+        const errorMessage = "Helius API key not found";
+        console.error(errorMessage);
+        throw Error(errorMessage);
+      }
+
+      const helius = new Helius(heliusApiKey);
+
+      // const webhook = await helius.createWebhook({
+      //   accountAddresses: [alert?.walletAddress],
+      //   transactionTypes: [TransactionType.ANY],
+      //   webhookType: WebhookType.ENHANCED,
+      //   webhookURL: "https://api.solsignal.xyz/transactionupdate",
+      //   authHeader: HELIUS_AUTH_HEADER,
+      // });
+
+      // logger.info("Webhook created: ", webhook);
+      // logger.info("Webhook ID: ", webhook.webhookID);
+
+      await helius.appendAddressesToWebhook(HELIUS_WEBHOOK_ID, [
+        alert?.walletAddress,
+      ]);
     }
-
-    const helius = new Helius(heliusApiKey);
-
-    // const webhook = await helius.createWebhook({
-    //   accountAddresses: [alert?.walletAddress],
-    //   transactionTypes: [TransactionType.ANY],
-    //   webhookType: WebhookType.ENHANCED,
-    //   webhookURL: "https://api.solsignal.xyz/transactionupdate",
-    //   authHeader: HELIUS_AUTH_HEADER,
-    // });
-
-    // logger.info("Webhook created: ", webhook);
-    // logger.info("Webhook ID: ", webhook.webhookID);
-
-    await helius.appendAddressesToWebhook(HELIUS_WEBHOOK_ID, [
-      alert?.walletAddress,
-    ]);
 
     await updateSystemAlertCount();
 
@@ -231,20 +239,55 @@ export const alertDeleted = onDocumentDeleted(
       throw Error(errorMessage);
     }
 
-    const helius = new Helius(heliusApiKey);
+    // check if they are other alerts configured for this address.. if not, remove from Helius
 
-    await helius.removeAddressesFromWebhook(HELIUS_WEBHOOK_ID, [
-      alert?.walletAddress,
-    ]);
+    const remainingAlertCount = await loadAlertCountForWalletAddress(
+      alert?.walletAddress
+    );
 
-    // const result = await helius.deleteWebhook(alert?.webhookID);
-    // logger.info("Webhook deleted. Result: ", result);
+    logger.info("Remaining alert count: " + remainingAlertCount);
+
+    if (remainingAlertCount == 0) {
+      const helius = new Helius(heliusApiKey);
+
+      await helius.removeAddressesFromWebhook(HELIUS_WEBHOOK_ID, [
+        alert?.walletAddress,
+      ]);
+
+      logger.info(
+        `Address ${alert?.walletAddress} removed from webhook with ID: ${HELIUS_WEBHOOK_ID}`
+      );
+
+      // const result = await helius.deleteWebhook(alert?.webhookID);
+      // logger.info("Webhook deleted. Result: ", result);
+    }
 
     await updateSystemAlertCount();
 
     logger.info("Address removed from webhook with ID: ", HELIUS_WEBHOOK_ID);
   }
 );
+
+// -----------------
+
+async function loadAlertCountForWalletAddress(walletAddress: string) {
+  const firestore = getFirestore(app);
+  logger.info("Firestore initialized");
+
+  const alertCountSnapshot = await firestore
+    .collection(FirestoreCollections.Alerts)
+    .where("walletAddress", "==", walletAddress)
+    .count()
+    .get();
+
+  const alertCount = alertCountSnapshot.data().count;
+
+  logger.info(
+    `Found alert count for wallet address ${walletAddress}: ${alertCount}`
+  );
+
+  return alertCount;
+}
 
 async function updateSystemAlertCount() {
   const firestore = getFirestore(app);
